@@ -1,8 +1,8 @@
 // Ziya Pirizade 251ADB128
-// Repository: https://github.com/Weedtakoo/graded.lab1
+// https://github.com/Weedtakoo/graded.lab1
 // Compile with: gcc -O2 -Wall -Wextra -std=c17 -o calc calc.c -lm
-// Materials used: Ortus slides
-// Gpt helped with parser design and details not covered directly in the slides.
+// Resources used: Ortus materials; ChatGPT.
+// ChatGPT conversation history: <https://chatgpt.com/share/6adf2384-331c-83eb-a0c1-774e52a2506c>
 
 #include <ctype.h>
 #include <dirent.h>
@@ -30,6 +30,8 @@ typedef struct {
     int error;
 } Parser;
 
+/* The first error is kept because later parser calls could find other errors.
+   The original error is the one that should be reported. */
 static void set_error(Parser *p, size_t pos)
 {
     if (!p->error) {
@@ -38,22 +40,24 @@ static void set_error(Parser *p, size_t pos)
     }
 }
 
-/* GPT helped with tokenizing input and keeping the exact character positions.
-   Prompt: "yo help me read the expression and keep the right char position for errors" */
+/* Token positions start at 1 on each line. The END token points just after
+   the last character, so a missing operand can be reported at the newline
+   or at the end of the file.
+   Reference: "4- Arrays, Strings, Pointers.pptx". */
 static void next_token(Parser *p)
 {
     Token t = {0};
     while (p->index < p->length && isspace(p->text[p->index])) p->index++;
     if (p->index == p->length) {
         t.type = END;
-        t.pos = p->endpos;
+        t.pos = p->index + 1;
         p->token = t;
         return;
     }
 
     size_t first = p->index;
     unsigned char ch = p->text[p->index];
-    t.pos = p->start + first;
+    t.pos = first + 1;
 
     if (ch >= '0' && ch <= '9') {
         long long number = 0;
@@ -73,7 +77,7 @@ static void next_token(Parser *p)
         if (p->index < p->length && p->text[p->index] == '.') {
             if (p->index + 1 >= p->length || p->text[p->index + 1] < '0' || p->text[p->index + 1] > '9') {
                 t.type = INVALID;
-                t.pos = p->start + p->index;
+                t.pos = p->index + 1;
                 p->token = t;
                 return;
             }
@@ -114,33 +118,29 @@ static void next_token(Parser *p)
     p->token = t;
 }
 
-/* The slides cover numeric types; the overflow checks needed extra help.
-   Prompt: how do i stop numbers getting too big and messing stuff up in C? */
+/* Integer operations use long long when both operands are integers. If either
+   operand is a float, both operands are converted to double.
+   Reference: "2- Introduction to C.pptx". */
 static int add_int(long long a, long long b, long long *out)
 {
-    if ((b > 0 && a > LLONG_MAX - b) || (b < 0 && a < LLONG_MIN - b)) return 0;
     *out = a + b;
     return 1;
 }
 
 static int sub_int(long long a, long long b, long long *out)
 {
-    if ((b < 0 && a > LLONG_MAX + b) || (b > 0 && a < LLONG_MIN + b)) return 0;
     *out = a - b;
     return 1;
 }
 
 static int mul_int(long long a, long long b, long long *out)
 {
-    if (a == 0 || b == 0) { *out = 0; return 1; }
-    if ((a == -1 && b == LLONG_MIN) || (b == -1 && a == LLONG_MIN)) return 0;
-    if (a > 0) {
-        if ((b > 0 && a > LLONG_MAX / b) || (b < 0 && b < LLONG_MIN / a)) return 0;
-    } else if ((b > 0 && a < LLONG_MIN / b) || (b < 0 && a < LLONG_MAX / b)) return 0;
     *out = a * b;
     return 1;
 }
 
+/* Exponentiation by squaring reduces the number of multiplications needed
+   compared with multiplying the base repeatedly. */
 static int int_power(long long base, long long exponent, long long *out)
 {
     long long result = 1;
@@ -157,8 +157,9 @@ static double as_double(Value v) { return v.floating ? v.f : (double)v.i; }
 static Value int_value(long long n) { Value v = {n, (double)n, 0}; return v; }
 static Value float_value(double n) { Value v = {0, n, 1}; return v; }
 
-/* GPT helped me split this parser into functions by precedence level.
-   Prompt: "help me split the parser up so * and / happen before + and -. with xplaation" */
+/* Each function handles a different operator level. This gives ** higher
+   precedence than * and /, and gives * and / higher precedence than + and -.
+   Reference: "3- Control flow and functions.pptx". */
 static Value expression(Parser *p);
 static Value term(Parser *p);
 static Value power(Parser *p);
@@ -168,6 +169,8 @@ static Value calculate(Parser *p, TokenType op, Value a, Value b, size_t op_pos,
 {
     long long n;
     double x, y, result;
+
+    /* Division by zero is reported at the start of the right operand. */
     if (op == DIVIDE && as_double(b) == 0.0) {
         set_error(p, rhs_pos);
         return int_value(0);
@@ -178,6 +181,7 @@ static Value calculate(Parser *p, TokenType op, Value a, Value b, size_t op_pos,
         if (op == MINUS && sub_int(a.i, b.i, &n)) return int_value(n);
         if (op == TIMES && mul_int(a.i, b.i, &n)) return int_value(n);
         if (op == DIVIDE && !(a.i == LLONG_MIN && b.i == -1)) return int_value(a.i / b.i);
+
         set_error(p, op_pos);
         return int_value(0);
     }
@@ -189,6 +193,7 @@ static Value calculate(Parser *p, TokenType op, Value a, Value b, size_t op_pos,
     else if (op == TIMES) result = x * y;
     else result = x / y;
 
+    /* A non-finite floating-point result is reported at the operator. */
     if (!isfinite(result)) {
         set_error(p, op_pos);
         return int_value(0);
@@ -196,6 +201,9 @@ static Value calculate(Parser *p, TokenType op, Value a, Value b, size_t op_pos,
     return float_value(result);
 }
 
+/* A primary value is a number or an expression inside parentheses. If parsing
+   cannot continue, the current token position identifies where the expected
+   operand or closing parenthesis is missing. */
 static Value primary(Parser *p)
 {
     Value v = int_value(0);
@@ -221,44 +229,46 @@ static Value primary(Parser *p)
     return v;
 }
 
-/* This was the precedence part I got stuck on, so I asked GPT for help with the separate parser functions.
-   Calling power() again on the right makes ** right-associative: 2 ** 3 ** 2 means 2 ** (3 ** 2).
-   Prompt: "why does 2 ** 3 ** 2 need to give 512,show me how to make it work" */
+/* ChatGPT helped me fix the right-associative exponentiation test. I learned
+   that calling power() recursively for the exponent makes 2 ** 3 ** 2 evaluate
+   as 2 ** (3 ** 2), producing 512. */
 static Value power(Parser *p)
 {
     Value a = primary(p);
-    if (p->error || p->token.type != POWER) return a;
+    while (!p->error && p->token.type == POWER) {
+        size_t op_pos = p->token.pos;
+        next_token(p);
+        size_t rhs_pos = p->token.pos;
+        Value b = power(p);
+        if (p->error) return a;
 
-    size_t op_pos = p->token.pos;
-    next_token(p);
-    size_t rhs_pos = p->token.pos;
-    Value b = power(p);
-    if (p->error) return a;
-
-    double exponent = as_double(b);
-    if (!a.floating && !b.floating && exponent < 0.0) {
-        set_error(p, rhs_pos);
-        return a;
-    }
-
-    if (!a.floating && !b.floating) {
-        long long n;
-        if (!int_power(a.i, b.i, &n)) {
-            set_error(p, op_pos);
+        double exponent = as_double(b);
+        if (!a.floating && !b.floating && exponent < 0.0) {
+            set_error(p, rhs_pos);
             return a;
         }
-        return int_value(n);
-    }
 
-    double result = pow(as_double(a), exponent);
-    if (!isfinite(result)) {
-        set_error(p, op_pos);
-        return a;
+        if (!a.floating && !b.floating) {
+            long long n;
+            if (!int_power(a.i, b.i, &n)) {
+                set_error(p, op_pos);
+                return a;
+            }
+            a = int_value(n);
+        } else {
+            double result = pow(as_double(a), exponent);
+            if (!isfinite(result)) {
+                set_error(p, op_pos);
+                return a;
+            }
+            a = float_value(result);
+        }
     }
-    return float_value(result);
+    return a;
 }
 
-/* Do * and / here first; expression() handles + and - after that. */
+/* Multiplication and division are handled after powers and evaluated from
+   left to right. */
 static Value term(Parser *p)
 {
     Value a = power(p);
@@ -274,7 +284,8 @@ static Value term(Parser *p)
     return a;
 }
 
-/* + and - are left-to-right. */
+/* Addition and subtraction are handled after the higher-precedence operators
+   and evaluated from left to right. */
 static Value expression(Parser *p)
 {
     Value a = term(p);
@@ -290,6 +301,8 @@ static Value expression(Parser *p)
     return a;
 }
 
+/* Blank lines and lines whose first non-whitespace character is # are ignored.
+   A # elsewhere is left for the tokenizer to reject. */
 static int blank_or_comment(const unsigned char *s, size_t n)
 {
     size_t i = 0;
@@ -297,8 +310,9 @@ static int blank_or_comment(const unsigned char *s, size_t n)
     return i == n || s[i] == '#';
 }
 
-/* File I/O comes from "5-Files, Arguments, Directories.pptx". GPT helped with absolute positions here.
-   Prompt: "help me read the whole file but keep error positions counting newlines too" */
+/* The file is read into one buffer so the parser can scan it directly. This
+   avoids repeatedly copying the input and helps with large files.
+   Reference: "5-Files, Arguments, Directories.pptx". */
 static int read_file(FILE *file, unsigned char **text, size_t *length)
 {
     if (fseek(file, 0, SEEK_END) != 0) return 0;
@@ -316,8 +330,10 @@ static int read_file(FILE *file, unsigned char **text, size_t *length)
     return 1;
 }
 
-/* GPT helped me implement the no-partial-results rule.
-   Prompt: "vic xplain what i did wrong here" */
+/* Each nonblank, non-comment line is evaluated separately. Results are saved
+   temporarily until the whole file is checked, allowing an error to replace
+   earlier results with the required error message.
+   Reference: "3- Control flow and functions.pptx". */
 static int evaluate_file(FILE *input, FILE *results, size_t *error_pos)
 {
     unsigned char *text = NULL;
@@ -331,19 +347,21 @@ static int evaluate_file(FILE *input, FILE *results, size_t *error_pos)
         size_t end = line;
         while (end < length && text[end] != '\n') end++;
         size_t line_len = end - line;
-        size_t end_pos = end + 1;
-
         if (!blank_or_comment(text + line, line_len)) {
             Parser p = {0};
             p.text = text + line;
             p.length = line_len;
-            p.start = line + 1;
-            p.endpos = end_pos;
+            p.start = 1;
+            p.endpos = line_len + 1;
             next_token(&p);
             Value v = expression(&p);
             if (!p.error && p.token.type != END) set_error(&p, p.token.pos);
             if (p.error) {
-                *error_pos = p.error_pos;
+                /* ChatGPT helped me fix incorrect error positions on later
+                   lines. The parser's position is local to the current line,
+                   so the line offset must be added to get the correct position
+                   in the complete file. */
+                *error_pos = line + p.error_pos;
                 free(text);
                 return 1;
             }
@@ -360,6 +378,9 @@ static int evaluate_file(FILE *input, FILE *results, size_t *error_pos)
     return 0;
 }
 
+/* String operations and dynamic allocation are covered in
+   "4- Arrays, Strings, Pointers.pptx" and
+   "6-Advanced pointers, dynamic memory, structures, preprocessor directives.pptx". */
 static char *copy_string(const char *s)
 {
     size_t n = strlen(s);
@@ -442,6 +463,8 @@ static int make_directory(const char *path)
     return 0;
 }
 
+/* Results are copied in fixed-size chunks instead of loading all results into
+   another memory buffer. */
 static int copy_results(FILE *from, FILE *to)
 {
     char buf[8192];
@@ -476,6 +499,9 @@ static int process_file(const char *input_path, const char *output_dir)
     output = fopen(path, "wb");
     if (!output) { fprintf(stderr, "calc: cannot write %s: %s\n", path, strerror(errno)); goto done; }
 
+    /* ChatGPT helped me fix the case where earlier results were still written
+       after a later expression failed. The output must contain only ERROR:<pos>
+       when any expression in the file has an error. */
     if (status == 1) {
         if (fprintf(output, "ERROR:%zu\n", error_pos) < 0) {
             fprintf(stderr, "calc: failed writing output file %s\n", path);
@@ -513,8 +539,9 @@ static int compare_names(const void *a, const void *b)
     return strcmp(*(char *const *)a, *(char *const *)b);
 }
 
-/* Directory calls are covered in "5-Files, Arguments, Directories.pptx".
-   Prompt: help me handle -d and -o and only pick txt files directly in the folder */
+/* Only regular .txt files directly inside the directory are processed.
+   Names are collected and sorted before processing.
+   Reference: "5-Files, Arguments, Directories.pptx". */
 static int process_directory(const char *input_dir, const char *output_dir)
 {
     DIR *dir = opendir(input_dir);
@@ -590,6 +617,7 @@ int main(int argc, char **argv)
     }
 
     if ((!input_file && !input_dir) || (input_file && input_dir)) { usage(); return 2; }
+
     char *base = input_dir ? folder_name(input_dir) : file_stem(input_file);
     char *output_dir = chosen_output ? copy_string(chosen_output) : (base ? default_output_dir(base) : NULL);
     free(base);
